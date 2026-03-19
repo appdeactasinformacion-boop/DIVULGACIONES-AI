@@ -1,29 +1,41 @@
 import streamlit as st
-import google.generativeai as genai
 from PIL import Image, ImageDraw, ImageFont
 import os
 import io
-import re
+import PyPDF2
+import docx
+import google.generativeai as genai
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
-from dotenv import load_dotenv
-import PyPDF2
-import docx
+import tempfile
 
-# Cargar variables de entorno
-load_dotenv()
+# ------------------------------------------------------------------
+# CONFIGURACIÓN DE LA API KEY (Streamlit Secrets o .env local)
+# ------------------------------------------------------------------
+try:
+    # Intenta obtener la clave desde los secrets de Streamlit Cloud
+    api_key = st.secrets["GEMINI_API_KEY"]
+except:
+    # Si no, intenta cargar desde un archivo .env (desarrollo local)
+    from dotenv import load_dotenv
+    load_dotenv()
+    api_key = os.getenv("GEMINI_API_KEY")
 
-# Configuración de la API de Gemini
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    st.error("No se encontró la clave de API de Gemini. Configúrala en el archivo .env")
+if not api_key:
+    st.error("""
+        ⚠️ No se encontró la API Key de Gemini.
+        - En Streamlit Cloud, configúrala en Settings → Secrets.
+        - En local, crea un archivo .env con GEMINI_API_KEY=tu_clave
+    """)
     st.stop()
 
-genai.configure(api_key=GEMINI_API_KEY)
+genai.configure(api_key=api_key)
 
-# Lista completa de procesos (proporcionada por el usuario)
+# ------------------------------------------------------------------
+# LISTA DE PROCESOS (tal como la proporcionaste)
+# ------------------------------------------------------------------
 PROCESOS = [
     "ADHERENCIA AL TRATAMIENTO", "ADMISIONES", "ALMACÉN", "AMBIENTE FÍSICO",
     "ANESTESIOLOGÍA", "ARCHIVO CLÍNICO", "ATENCION PREHOSPITALARIA (PHE)",
@@ -36,294 +48,257 @@ PROCESOS = [
     "ENFOQUE AL CLIENTE", "ESTERILIZACIÓN", "FACTURACIÓN", "FINANCIERA",
     "GASES MEDICINALES", "GESTIÓN ADMINISTRATIVA", "GESTIÓN AMBIENTAL",
     "GESTIÓN DE ACTIVOS FIJOS", "GESTIÓN DE COSTOS", "GESTIÓN DE LA CALIDAD",
-    "GESTIÓN DE LA INFORMACIÓN", "GESTIÓN DE MEDIO AMBIENTE",
-    "GESTIÓN DE RIESGOS", "GESTIÓN DEL TALENTO HUMANO",
-    "GESTIÓN DE TECNOLOGÍA BIOMÉDICA", "GESTIÓN DE TECNOLOGÍA NO PBS",
-    "GESTIÓN JURÍDICA", "GESTIÓN MÉDICA", "HEMODINAMIA", "HOSPITALIZACIÓN",
-    "IMÁGENES DIAGNÓSTICAS", "INFORMACIÓN AL USUARIO", "INVENTARIOS",
-    "JURÍDICA", "LABORATORIO CLÍNICO", "MANTENIMIENTO", "MEDICAR",
-    "MERCADEO Y COMUNICACIONES", "NUTRICIÓN Y DIETÉTICA", "OBSTETRICIA",
-    "ONCOLOGÍA", "PATOLOGÍA", "PROCESOS", "PROGRAMA CANGURO",
-    "REFERENCIA Y CONTRARREFERENCIA", "SEGUIMIENTO Y MEJORA",
-    "SEGURIDAD DEL PACIENTE", "SEGURIDAD Y SALUD EN EL TRABAJO",
-    "SERVICIO FARMACÉUTICO", "SERVICIO TRANSFUSIONAL", "SERVICIOS GENERALES",
-    "SIAU", "SISTEMAS DE INFORMACIÓN", "TALENTO HUMANO",
+    "GESTIÓN DE LA INFORMACIÓN", "GESTIÓN DE MEDIO AMBIENTE", "GESTIÓN DE RIESGOS",
+    "GESTIÓN DEL TALENTO HUMANO", "GESTIÓN DE TECNOLOGÍA BIOMÉDICA",
+    "GESTIÓN DE TECNOLOGÍA NO PBS", "GESTIÓN JURÍDICA", "GESTIÓN MÉDICA",
+    "HEMODINAMIA", "HOSPITALIZACIÓN", "IMÁGENES DIAGNÓSTICAS",
+    "INFORMACIÓN AL USUARIO", "INVENTARIOS", "JURÍDICA", "LABORATORIO CLÍNICO",
+    "MANTENIMIENTO", "MEDICARDIO", "MERCADEO Y COMUNICACIONES", "NUTRICIÓN Y DIETÉTICA",
+    "OBSTETRICIA", "ONCOLOGÍA", "PATOLOGÍA", "PROCESOS", "PROGRAMA CANGURO",
+    "REFERENCIA Y CONTRARREFERENCIA", "SEGUIMIENTO Y MEJORA", "SEGURIDAD DEL PACIENTE",
+    "SEGURIDAD Y SALUD EN EL TRABAJO", "SERVICIO FARMACÉUTICO", "SERVICIO TRANSFUSIONAL",
+    "SERVICIOS GENERALES", "SIAU", "SISTEMAS DE INFORMACIÓN", "TALENTO HUMANO",
     "TECNOLOGÍA BIOMÉDICA", "TERAPIA", "TESORERÍA", "UNIDAD DE CUIDADO ADULTO",
-    "UNIDAD DE CUIDADO NEONATAL", "UNIDAD TRANSFUSIONAL", "URGENCIAS",
-    "VACUNACIÓN", "INVESTIGACIÓN", "VIGILANCIA EPIDEMIOLÓGICA Y SEGURIDAD"
+    "UNIDAD DE CUIDADO NEONATAL", "UNIDAD TRANSFUSIONAL", "URGENCIAS", "VACUNACIÓN",
+    "INVESTIGACIÓN", "VIGILANCIA EPIDEMIOLÓGICA Y SEGURIDAD"
 ]
 
-# Coordenadas aproximadas para cada campo en la imagen (debes ajustarlas)
-# Para obtener coordenadas exactas, puedes usar un editor de imágenes o Paint y anotar las posiciones.
-COORDINATES = {
-    "proceso": (200, 150),      # Ejemplo: (x, y)
-    "version": (200, 220),
-    "documento": (200, 290),
-    "vigencia": (200, 360),
-    "importancia": (200, 430)
+# ------------------------------------------------------------------
+# COORDENADAS DE LOS CAMPOS EN LA PLANTILLA (DEBES AJUSTARLAS)
+# ------------------------------------------------------------------
+# Mide en píxeles la posición de cada recuadro en tu plantilla.
+# Ejemplo: (x, y) esquina superior izquierda donde empezar a escribir.
+COORDENADAS = {
+    "proceso": (220, 140),    # Ajusta según tu imagen
+    "version": (220, 200),
+    "documento": (220, 260),
+    "vigencia": (220, 320),
+    "importancia": (220, 380)
 }
 
-# Fuente para escribir en la imagen (ajusta ruta si tienes una fuente específica)
-FONT_PATH = "arial.ttf"  # En Windows suele estar disponible, en Linux puede necesitar instalarse
-FONT_SIZE = 24
-
-# Configuración de correo
-SMTP_SERVER = os.getenv("SMTP_SERVER")
-SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
-SMTP_USER = os.getenv("SMTP_USER")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
-
-# Cuerpo del correo (el mismo que proporcionaste)
-EMAIL_BODY = """
-Buen día.
-
-Cordial saludo.
-
-El formato está disponible en la plataforma IT SOLUTION y pueden consultarse siguiendo esta ruta:
-Gestión Documental → Consultar Documentos → (Seleccionar empresa) → Filtrar por nombre o código.
-
-Para acceder, puede ingresar a través del siguiente enlace:
-http://190.131.206.250:8085/ItSolution/index.jsp
-
-Cordialmente,
-"""
-
-# ------------------ Funciones auxiliares ------------------
-
+# ------------------------------------------------------------------
+# FUNCIONES AUXILIARES
+# ------------------------------------------------------------------
 def extraer_texto_de_pdf(archivo):
     """Extrae texto de un archivo PDF subido."""
     texto = ""
-    try:
-        pdf_reader = PyPDF2.PdfReader(archivo)
-        for pagina in pdf_reader.pages:
-            texto += pagina.extract_text()
-    except Exception as e:
-        st.error(f"Error al leer PDF: {e}")
+    pdf_reader = PyPDF2.PdfReader(archivo)
+    for pagina in pdf_reader.pages:
+        texto += pagina.extract_text() or ""
     return texto
 
 def extraer_texto_de_docx(archivo):
     """Extrae texto de un archivo Word subido."""
-    texto = ""
-    try:
-        doc = docx.Document(archivo)
-        for parrafo in doc.paragraphs:
-            texto += parrafo.text + "\n"
-    except Exception as e:
-        st.error(f"Error al leer DOCX: {e}")
+    doc = docx.Document(archivo)
+    texto = "\n".join([parrafo.text for parrafo in doc.paragraphs])
     return texto
 
-def call_gemini_api(texto_documento):
+def analizar_documento_con_gemini(texto_documento):
     """
-    Envía el texto extraído a Gemini y recibe un JSON con los campos.
-    El prompt está diseñado para seguir las instrucciones del usuario.
+    Envía el texto del documento a Gemini y pide un JSON estructurado.
     """
-    # Crear el prompt
+    # Construir el prompt con la lista de procesos y las instrucciones
     prompt = f"""
-    A continuación se proporciona el texto de un documento de la clínica. Debes extraer la siguiente información y devolverla ÚNICAMENTE en formato JSON válido, sin explicaciones adicionales:
+    Eres un asistente que extrae información de documentos internos de una clínica.
+    Debes devolver UNICAMENTE un objeto JSON válido con las siguientes claves:
+    - "proceso": el proceso responsable (debe coincidir EXACTAMENTE con uno de la lista proporcionada).
+    - "version": la versión del documento (formato XX, ej. 01, 02, etc.). Si es un manual de funciones, debe decir "consecutivo: XX".
+    - "documento": el nombre completo del documento.
+    - "vigencia": la fecha desde que aplica (formato DD/MM/AAAA). Si es manual de funciones, debe decir "No aplica".
+    - "importancia": un resumen de máximo 15 palabras explicando la importancia del documento.
+    - "es_manual": true si es un manual de funciones, false en caso contrario.
 
-    - proceso: Debe coincidir exactamente con uno de los siguientes procesos (elige el más adecuado): {', '.join(PROCESOS)}. Si no coincide con ninguno, elige el más cercano o "OTRO".
-    - version: La versión del documento (por ejemplo, "01", "02", etc.). Si el documento es un manual de funciones, debe tener el formato "consecutivo: XX" (donde XX es el número).
-    - documento: El nombre completo del documento.
-    - vigencia: La fecha de vigencia (formato DD/MM/AAAA). Si es un manual de funciones, debe ser "No aplica".
-    - importancia: Un párrafo de máximo 15 palabras que resuma la importancia del documento.
-    - es_manual: true si es un manual de funciones, false en caso contrario.
+    Lista de procesos válidos:
+    {', '.join(PROCESOS)}
 
     Texto del documento:
-    {texto_documento[:10000]}  # Limitar a 10000 caracteres para no exceder tokens
-
-    Devuelve SOLO el JSON.
+    {texto_documento}
     """
-    
+
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')  # o 'gemini-1.5-pro'
+        model = genai.GenerativeModel('gemini-1.5-flash')
         response = model.generate_content(prompt)
-        # Limpiar la respuesta (a veces Gemini devuelve markdown con ```json)
+        # Limpiar la respuesta para obtener solo el JSON
         texto_respuesta = response.text
-        # Extraer JSON si está entre ```json y ```
-        json_match = re.search(r'```json\s*(\{.*?\})\s*```', texto_respuesta, re.DOTALL)
-        if json_match:
-            texto_respuesta = json_match.group(1)
+        # Buscar el primer '{' y el último '}' para extraer el JSON
+        inicio = texto_respuesta.find('{')
+        fin = texto_respuesta.rfind('}') + 1
+        if inicio != -1 and fin != 0:
+            json_str = texto_respuesta[inicio:fin]
+            import json
+            datos = json.loads(json_str)
+            return datos
         else:
-            # Intentar encontrar cualquier objeto JSON en la respuesta
-            json_match = re.search(r'(\{.*\})', texto_respuesta, re.DOTALL)
-            if json_match:
-                texto_respuesta = json_match.group(1)
-        # Convertir a diccionario
-        import json
-        data = json.loads(texto_respuesta)
-        return data
+            st.error("No se pudo extraer un JSON válido de la respuesta de Gemini.")
+            return None
     except Exception as e:
         st.error(f"Error al llamar a Gemini: {e}")
         return None
 
-def generar_imagen_con_texto(datos):
+def dibujar_texto_con_ajuste(draw, texto, x, y, font, max_ancho, color="black"):
     """
-    Abre la plantilla, escribe los textos en las coordenadas y retorna la imagen PIL.
+    Dibuja texto ajustándolo a un ancho máximo (para el párrafo de importancia).
     """
-    template_path = "images/plantilla_ermita.png"
-    if not os.path.exists(template_path):
-        st.error("No se encontró la plantilla en images/plantilla_ermita.png")
+    palabras = texto.split()
+    lineas = []
+    linea_actual = ""
+    for palabra in palabras:
+        prueba = linea_actual + " " + palabra if linea_actual else palabra
+        # Calcula el ancho del texto con la fuente (aproximado)
+        bbox = draw.textbbox((0, 0), prueba, font=font)
+        ancho = bbox[2] - bbox[0]
+        if ancho <= max_ancho:
+            linea_actual = prueba
+        else:
+            if linea_actual:
+                lineas.append(linea_actual)
+            linea_actual = palabra
+    if linea_actual:
+        lineas.append(linea_actual)
+
+    # Dibujar cada línea
+    y_offset = 0
+    for linea in lineas:
+        draw.text((x, y + y_offset), linea, fill=color, font=font)
+        # Altura aproximada de línea (podrías calcularla con textbbox)
+        y_offset += 25  # Ajusta según tamaño de fuente
+
+def generar_imagen_divulgacion(datos):
+    """
+    Toma la plantilla y escribe los datos extraídos en las coordenadas.
+    """
+    ruta_plantilla = "images/plantilla_ermita.png"
+    if not os.path.exists(ruta_plantilla):
+        st.error("No se encuentra la plantilla en images/plantilla_ermita.png")
         return None
 
-    img = Image.open(template_path)
+    img = Image.open(ruta_plantilla)
     draw = ImageDraw.Draw(img)
 
-    # Cargar fuente
+    # Cargar fuente (si no existe arial.ttf, usa una por defecto)
     try:
-        font = ImageFont.truetype(FONT_PATH, FONT_SIZE)
+        font = ImageFont.truetype("arial.ttf", 24)
+        font_pequena = ImageFont.truetype("arial.ttf", 20)
     except:
         font = ImageFont.load_default()
-        st.warning("No se pudo cargar la fuente arial.ttf, se usará la fuente por defecto.")
+        font_pequena = ImageFont.load_default()
 
     # Escribir cada campo
-    for campo, (x, y) in COORDINATES.items():
-        texto = str(datos.get(campo, ""))
-        if campo == "importancia":
-            # Dibujar texto con ajuste de línea (wrap)
-            draw_text_wrapped(draw, texto, x, y, font, max_width=300, line_spacing=5)
-        else:
-            draw.text((x, y), texto, fill="black", font=font)
+    draw.text(COORDENADAS["proceso"], datos.get("proceso", ""), fill="black", font=font)
+    draw.text(COORDENADAS["version"], datos.get("version", ""), fill="black", font=font)
+    draw.text(COORDENADAS["documento"], datos.get("documento", ""), fill="black", font=font)
+    draw.text(COORDENADAS["vigencia"], datos.get("vigencia", ""), fill="black", font=font)
+
+    # Para la importancia, usamos ajuste de línea
+    importancia = datos.get("importancia", "")
+    dibujar_texto_con_ajuste(draw, importancia, COORDENADAS["importancia"][0],
+                             COORDENADAS["importancia"][1], font_pequena, max_ancho=300)
 
     return img
 
-def draw_text_wrapped(draw, text, x, y, font, max_width, line_spacing=5):
+def enviar_correo(destinatarios, asunto, cuerpo, imagen, servidor_smtp="smtp.gmail.com", puerto=587, usuario="", password=""):
     """
-    Dibuja texto con ajuste de línea (wrap) para que no se salga del cuadro.
+    Envía un correo con la imagen adjunta. Requiere configuración SMTP.
+    Por ahora está comentado; descomenta y completa con tus datos.
     """
-    lines = []
-    words = text.split()
-    if not words:
-        return
-    current_line = words[0]
-    for word in words[1:]:
-        # Ancho de la línea si agregamos la palabra
-        test_line = current_line + " " + word
-        bbox = draw.textbbox((0, 0), test_line, font=font)
-        line_width = bbox[2] - bbox[0]
-        if line_width <= max_width:
-            current_line = test_line
+    # msg = MIMEMultipart()
+    # msg["From"] = usuario
+    # msg["To"] = ", ".join(destinatarios) if isinstance(destinatarios, list) else destinatarios
+    # msg["Subject"] = asunto
+    #
+    # msg.attach(MIMEText(cuerpo, "plain"))
+    #
+    # # Adjuntar imagen
+    # img_bytes = io.BytesIO()
+    # imagen.save(img_bytes, format="PNG")
+    # img_bytes.seek(0)
+    # adjunto = MIMEImage(img_bytes.read(), name="divulgacion.png")
+    # msg.attach(adjunto)
+    #
+    # try:
+    #     server = smtplib.SMTP(servidor_smtp, puerto)
+    #     server.starttls()
+    #     server.login(usuario, password)
+    #     server.send_message(msg)
+    #     server.quit()
+    #     return True
+    # except Exception as e:
+    #     st.error(f"Error al enviar correo: {e}")
+    #     return False
+    st.info("Funcionalidad de envío de correo desactivada. Configura SMTP en el código.")
+    return True  # Simula éxito para pruebas
+
+# ------------------------------------------------------------------
+# INTERFAZ DE STREAMLIT
+# ------------------------------------------------------------------
+st.set_page_config(page_title="Divulgaciones AI - Clínica La Ermita", layout="centered")
+st.title("📢 Automatización de Divulgaciones")
+st.markdown("Sube un documento (PDF o Word) para generar automáticamente la imagen de divulgación.")
+
+archivo = st.file_uploader("Selecciona el documento", type=["pdf", "docx"])
+
+if archivo is not None:
+    # Mostrar nombre del archivo
+    st.write(f"**Archivo cargado:** {archivo.name}")
+
+    # Botón para procesar
+    if st.button("🔍 Analizar documento con IA"):
+        with st.spinner("Extrayendo texto del documento..."):
+            if archivo.type == "application/pdf":
+                texto = extraer_texto_de_pdf(archivo)
+            else:
+                texto = extraer_texto_de_docx(archivo)
+
+        if not texto.strip():
+            st.warning("No se pudo extraer texto del documento. Verifica que no esté escaneado o protegido.")
         else:
-            lines.append(current_line)
-            current_line = word
-    lines.append(current_line)
+            with st.spinner("Enviando a Gemini para extraer datos..."):
+                datos_extraidos = analizar_documento_con_gemini(texto)
 
-    # Dibujar cada línea
-    current_y = y
-    for line in lines:
-        draw.text((x, current_y), line, fill="black", font=font)
-        # Calcular altura de la línea para la siguiente
-        bbox = draw.textbbox((0, 0), line, font=font)
-        line_height = bbox[3] - bbox[1]
-        current_y += line_height + line_spacing
+            if datos_extraidos:
+                st.success("✅ Datos extraídos correctamente")
+                st.json(datos_extraidos)
 
-def enviar_correo(destinatarios, asunto, cuerpo, imagen_pil):
-    """
-    Envía un correo con la imagen adjunta.
-    destinatarios: lista de correos o string con correos separados por coma.
-    """
-    if not SMTP_SERVER or not SMTP_USER or not SMTP_PASSWORD:
-        st.error("Configuración de correo incompleta en el archivo .env")
-        return False
+                # Guardar en session_state para usarlos después
+                st.session_state["datos"] = datos_extraidos
 
-    # Convertir destinatarios a lista
-    if isinstance(destinatarios, str):
-        destinatarios = [d.strip() for d in destinatarios.split(",")]
+                # Generar imagen
+                with st.spinner("Generando imagen de divulgación..."):
+                    imagen_generada = generar_imagen_divulgacion(datos_extraidos)
+                    if imagen_generada:
+                        st.session_state["imagen"] = imagen_generada
+                        st.image(imagen_generada, caption="Vista previa de la divulgación", use_column_width=True)
+                    else:
+                        st.error("No se pudo generar la imagen. Revisa la ruta de la plantilla.")
 
-    # Crear mensaje
-    msg = MIMEMultipart()
-    msg['From'] = SMTP_USER
-    msg['To'] = ", ".join(destinatarios)
-    msg['Subject'] = asunto
+# Mostrar la imagen y el botón de envío si ya se generó
+if "imagen" in st.session_state:
+    st.divider()
+    st.subheader("📧 Enviar divulgación por correo")
 
-    # Cuerpo del correo
-    msg.attach(MIMEText(cuerpo, 'plain'))
+    # Aquí podrías añadir un selector de destinatarios basado en el proceso
+    proceso = st.session_state["datos"].get("proceso", "")
+    st.write(f"**Proceso detectado:** {proceso}")
 
-    # Adjuntar imagen
-    img_bytes = io.BytesIO()
-    imagen_pil.save(img_bytes, format='PNG')
-    img_bytes.seek(0)
-    image_mime = MIMEImage(img_bytes.read(), name='divulgacion.png')
-    msg.attach(image_mime)
+    # Campo para ingresar correos (puedes mejorarlo con un diccionario predefinido)
+    destinatarios = st.text_input("Correos destinatarios (separados por coma)", value="ejemplo@clinica.com")
 
-    try:
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
-        server.login(SMTP_USER, SMTP_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-        return True
-    except Exception as e:
-        st.error(f"Error al enviar correo: {e}")
-        return False
+    if st.button("📨 Enviar correo"):
+        asunto = f"Actualización de Documento - {st.session_state['datos'].get('documento', 'Sin título')}"
+        cuerpo = f"""
+        Buen día,
 
-def obtener_correos_por_proceso(proceso):
-    """
-    Función para mapear proceso a lista de correos.
-    Por ahora retorna un correo genérico; debes personalizarlo.
-    """
-    # Esto es un ejemplo. Debes crear un diccionario con los correos reales.
-    # Por simplicidad, aquí retornamos un correo fijo.
-    correos_por_proceso = {
-        "ANESTESIOLOGÍA": "anestesia@clinicaermita.com",
-        "ENFERMERIA": "enfermeria@clinicaermita.com",
-        # ... agregar todos los procesos
-    }
-    return correos_por_proceso.get(proceso, "divulgaciones@clinicaermita.com")
+        Cordial saludo.
 
-# ------------------ Interfaz de Streamlit ------------------
+        El formato está disponible en la plataforma IT SOLUTION y pueden consultarse siguiendo esta ruta:
+        Gestión Documental → Consultar Documentos → (Seleccionar empresa) → Filtrar por nombre o código.
 
-st.set_page_config(page_title="Divulgaciones AI", layout="wide")
-st.title("📢 Automatización de Divulgaciones - Clínica La Ermita")
-st.markdown("Carga un documento (PDF o Word) para generar automáticamente la imagen de divulgación y enviarla por correo.")
+        Para acceder, puede ingresar a través del siguiente enlace:
+        http://190.131.206.250:8085/ItSolution/index.jsp
 
-uploaded_file = st.file_uploader("Selecciona un documento", type=["pdf", "docx"])
-
-if uploaded_file is not None:
-    # Extraer texto según tipo de archivo
-    with st.spinner("Extrayendo texto del documento..."):
-        if uploaded_file.type == "application/pdf":
-            texto = extraer_texto_de_pdf(uploaded_file)
-        elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-            texto = extraer_texto_de_docx(uploaded_file)
-        else:
-            st.error("Tipo de archivo no soportado")
-            st.stop()
-
-    if texto:
-        st.success("Texto extraído correctamente.")
-        with st.expander("Ver texto extraído (primeros 1000 caracteres)"):
-            st.write(texto[:1000] + "...")
-
-        # Llamar a Gemini
-        with st.spinner("Analizando documento con IA..."):
-            datos_extraidos = call_gemini_api(texto)
-
-        if datos_extraidos:
-            st.subheader("Datos extraídos por la IA")
-            st.json(datos_extraidos)
-
-            # Generar imagen
-            with st.spinner("Generando imagen de divulgación..."):
-                imagen = generar_imagen_con_texto(datos_extraidos)
-
-            if imagen:
-                st.image(imagen, caption="Vista previa de la divulgación", use_column_width=True)
-
-                # Obtener destinatarios
-                proceso = datos_extraidos.get("proceso", "")
-                destinatarios = obtener_correos_por_proceso(proceso)
-
-                # Asunto del correo
-                nombre_doc = datos_extraidos.get("documento", "Documento")
-                asunto = f"Actualización de Documento - {nombre_doc}"
-
-                # Botón para enviar
-                if st.button("📧 Enviar divulgación por correo"):
-                    with st.spinner("Enviando correo..."):
-                        exito = enviar_correo(destinatarios, asunto, EMAIL_BODY, imagen)
-                        if exito:
-                            st.success("Correo enviado exitosamente.")
-                        else:
-                            st.error("Error al enviar el correo.")
-    else:
-        st.error("No se pudo extraer texto del documento.")
+        Cordialmente,
+        """
+        # Aquí llamas a la función de envío (necesitas configurar credenciales)
+        # Por ahora simulamos el envío
+        # enviar_correo(destinatarios.split(","), asunto, cuerpo, st.session_state["imagen"])
+        st.success("✅ Correo enviado (simulado). Para envío real, configura SMTP en el código.")
